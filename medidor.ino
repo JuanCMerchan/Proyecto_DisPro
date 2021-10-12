@@ -12,101 +12,188 @@
 #define SEGM_F 7
 #define SEGM_G 8
 #define SEGM_P 9
-
-#define READ 1
+#define RED_P A1
+#define GREEN_P A2
+#define BLUE_P A3
 
 #define HR_STRING_SIZE 5
 
 enum STATE_DB {READING, WAITING};
-enum STATE_HR {READING_HR};
+enum STATE_HR {READING_HR, READING_AGE};
 enum STATE_DP {DISPLAYING};
 
-unsigned char bouncedSignal;
-unsigned char cleanSignal;
-char heartRate[HR_STRING_SIZE] = "0000";
+struct SignalFSM
+{
+    STATE_DB state;
+    unsigned char currentReading;
+    unsigned char previousReading;
+    unsigned long previousTime;
+    unsigned char cleanSignal;
+    int inputPin;
+};
+
+struct HeartRateFSM
+{
+    unsigned char current;
+    unsigned char previous;
+    unsigned long currentEdge;
+    unsigned long previousEdge;
+    unsigned int heartRateNum;
+    STATE_HR state;
+    int counter;
+    int age;
+    int maxHR;
+};
+
+struct DisplayFSM
+{
+    STATE_DP state = DISPLAYING;
+    char previousWord[HR_STRING_SIZE] = "0000";
+    unsigned char characters[HR_STRING_SIZE - 1];
+    char word[HR_STRING_SIZE] = "0000";
+    unsigned char decimal;
+};
+
+SignalFSM sFSM;
+SignalFSM cFSM;
+HeartRateFSM hRFSM;
+DisplayFSM dFSM;
 
 unsigned char segments[] = {SEGM_A, SEGM_B, SEGM_C, SEGM_D, SEGM_E, SEGM_F, SEGM_G, SEGM_P};
 unsigned char digitPins[] = {DIG_1, DIG_2, DIG_3, DIG_4};
+unsigned char colorPins[] = {RED_P, GREEN_P, BLUE_P};
 
-static unsigned char digitTable[] =
+/*
+Tabla con los bytes que indican el encendido o apagado de un led para cierto caracter
+*/
+static unsigned char charTable[] =
     {
-        0b01110111,
-        0b01111100,
-        0b00111001,
-        0b01011110,
-        0b00111111,
-        0b00000110,
-        0b01011011,
-        0b01001111,
-        0b01100110,
-        0b01101101,
-        0b01111101,
-        0b00000111,
-        0b01111111,
-        0b01101111
+        0b01110111, //a
+        0b01111100, //b
+        0b00111001, //c
+        0b01011110, //d
+        0b01111001, //e
+        0b01110001, //f
+        0b01101111, //g
+        0b01110110, //h
+        0b00110000, //i
+        0b00011110, //j
+        0b00000000,
+        0b00111000, //l
+        0b00000000,
+        0b01010100, //n
+        0b00111111, //o
+        0b01110011, //p
+        0b01100111, //q
+        0b01010000, //r
+        0b01101101, //s
+        0b01111000, //t
+        0b00111110, //u
+        0b00011100, //v
+        0b00000000,
+        0b00000000,
+        0b01101110, //y
+        0b01011011, //z
+        0b00111111, //0
+        0b00000110, //1
+        0b01011011, //2
+        0b01001111, //3
+        0b01100110, //4
+        0b01101101, //5
+        0b01111101, //6
+        0b00000111, //7
+        0b01111111, //8
+        0b01101111, //9
+        0b00000000 //space
     };
 
-void heartRateTo7S(unsigned char digits[HR_STRING_SIZE - 1])
+/*
+Funcion que transforma una palabra a un set de bytes que indican que 
+pines encender o apagar por cada caracter
+*/
+void wordTo7S(char word[HR_STRING_SIZE], unsigned char characters[HR_STRING_SIZE - 1])
 {
-    for(int i = 0; i < HR_STRING_SIZE; i++)
+    for(int i = 0; i < HR_STRING_SIZE - 1; i++) //Se recorre la palabra
     {
-        unsigned char value = heartRate[HR_STRING_SIZE - i - 2];
-        if(value >= 97 && value <= 100)
+        unsigned char value = word[HR_STRING_SIZE - i - 2]; //value toma el valor de un caracter
+        if(value >= 97 && value <= 122) //Si el caracter es una letra
         {
             value -= 97;
         }
-        else
+        else if(value >= 48 && value <= 57) //Si el caracter es un digito
         {
-            value = value - 48 + 4;
+            value = value - 48 + 26;
         }
-        digits[i] = digitTable[value];
-        if(i == 1)
+        else if(value == 32) //Si el caracter es el de espacio
         {
-            digits[i] = digits[i] | 0b10000000;
+            value = 26 + 10;
         }
-        
+        characters[i] = charTable[value]; //Se busca la secuencia adecuada y se guarda en caracteres[i]
     }
 }
 
-void displayDigits(unsigned char digits[HR_STRING_SIZE - 1])
+void displayCharacters(unsigned char characters[HR_STRING_SIZE - 1])
 {
-    for (int i = 0; i < HR_STRING_SIZE - 1; i++)
+    for (int i = 0; i < HR_STRING_SIZE - 1; i++) //Se recorren los caracteres
     {
-        for (int j = 0; j < 4; j++)
+        for (int j = 0; j < 4; j++) //Se apagan todos los pines de digitos
         {
             digitalWrite(digitPins[j], LOW);
         }
-        if ((3 - i) < 4 && (3 - i) >= 0)
+        if ((3 - i) < 4 && (3 - i) >= 0) //Si el caracter se mostraria en el display
         {
             digitalWrite(digitPins[3 - i], HIGH);
-            for (int j = 7; j >= 0; j--)
+            for (int j = 7; j >= 0; j--) //Se recorren los bits del character
             {
-                int turnOn = (digits[i] >> j) & 0x01;
-                digitalWrite(segments[j], !turnOn);
+                int turnOn = (characters[i] >> j) & 0x01; //Se guarda el bit en la posicion j del caracter en turnOn
+                digitalWrite(segments[j], !turnOn); //Se pone el pin en segmentos[j] en el modo opuesto a turnOn
             }
-            delay(4);
+            delay(4); //Se espera 4 milisegundos
         }
     }
 }
 
-void display()
+/*
+Funcion que agrega un decimal al tercer caracter que se muestra en el display
+*/
+void addDecimal(unsigned char characters[HR_STRING_SIZE - 1])
 {
-    static STATE_DP state = DISPLAYING;
-    static unsigned long currentMillis = millis();
-    static unsigned long previousMillis = currentMillis;
-    static char previousHr[HR_STRING_SIZE] = "    ";
-    static unsigned char digits[HR_STRING_SIZE - 1];
-    switch (state)
+   
+    characters[1] = characters[1] | 0b10000000;
+        
+}
+
+/*
+Inicializacion de variable del tipo DisplayFSM
+*/
+void initializeDisplayFSM(DisplayFSM *displayFSM)
+{
+    displayFSM->state = DISPLAYING;
+    displayFSM->decimal = 0;
+}
+
+/*
+Funcion que hace display a la palabra que se encuentra como atributo en el argumento
+displayFSM
+*/
+void display(DisplayFSM *displayFSM)
+{
+    
+    switch (displayFSM->state)
     {
     case DISPLAYING:
-        if(strcmp(previousHr, heartRate) != 0)
+        if(strcmp(displayFSM->previousWord, displayFSM->word) != 0) //Si la palabra anterior es distinta a la actual
         {
-            strcpy(previousHr, heartRate);
-            heartRateTo7S(digits);
+            strcpy(displayFSM->previousWord, displayFSM->word); //La palabra actual se guarda en la palabra anterior
+            wordTo7S(displayFSM->word, displayFSM->characters); //Se pasa la palabra al modo para hacer display en el 7 segmentos
+            if(displayFSM->decimal) //Si la palabra debe llevar decimal 
+            {
+                addDecimal(displayFSM->characters); //Se agrega el decimal
+            } 
         }
         else
         {
-            displayDigits(digits);
+            displayCharacters(displayFSM->characters); //Se le hace display a los caracteres de la palabra
         }
         break;
     default:
@@ -114,83 +201,166 @@ void display()
     }
 }
 
-void deBouncer()
+/*
+Inicializacion de variable del tipo signalFSM
+*/
+void initializeSignalFSM(SignalFSM *signalFSM, int inputPin)
 {
-    static STATE_DB state = READING; 
-    static unsigned char currentReading = digitalRead(READ);
-    static unsigned char previousReading = currentReading;
-    static unsigned long previousTime;
+    signalFSM->state = READING;
+    signalFSM->inputPin = inputPin;
+    pinMode(signalFSM->inputPin, INPUT);
+    signalFSM->currentReading = digitalRead(signalFSM->inputPin);
+    signalFSM->previousReading = signalFSM->currentReading;
+    signalFSM->cleanSignal = LOW;
+}
+
+void deBouncer(SignalFSM *signalFSM)
+{
     int extintion = 50;
 
-    switch (state)
+    switch (signalFSM->state)
     {
     case READING:
-        if(previousReading == currentReading)
+        if(signalFSM->previousReading == signalFSM->currentReading) //Si la lectura anterior es igual a la lectura actual
         {
-            currentReading = digitalRead(READ);
+            signalFSM->currentReading = digitalRead(signalFSM->inputPin); //Se actualiza el valor de la lectura actual
         }
         else
         {
-            previousTime = millis();
-            cleanSignal = currentReading;
-            state = WAITING;
+            signalFSM->previousTime = millis(); //Se actualiza el valor de los milisegundos anteriores
+            signalFSM->cleanSignal = signalFSM->currentReading; //Se cambia el valor de la señal limpia al de la lectura actual
+            signalFSM->state = WAITING; //Se cambia el estado al de espera
         }
         break;
     case WAITING:
-        if(millis() - previousTime >= extintion)
+        if(millis() - signalFSM->previousTime >= extintion) //Se espera hasta que se cumpla el requerimiento de tiempo
         {
-            previousReading = currentReading;
-            currentReading = digitalRead(READ);
-            state = READING;
+            signalFSM->previousReading = signalFSM->currentReading;
+            signalFSM->currentReading = digitalRead(signalFSM->inputPin);
+            signalFSM->state = READING; //Se cambia el estado al de lectura
         }
     default:
         break;
     }
 }
-
-void convertHeartRateToString(int heartRateNum)
+/*
+Funcion que combierte un numero a un string
+*/
+void convertNumberToString(int number, char word[HR_STRING_SIZE])
 {
-    if(heartRateNum >= 1000)
+    //Depende del tamaño del numero se agregan un numero de ceros al frente
+    if(number >= 1000)
     {
-        sprintf(heartRate, "%d", heartRateNum);
+        sprintf(word, "%d", number);
+    }
+    else if(number >= 100)
+    {
+        sprintf(word, "0%d", number);
+
+    }
+    else if(number >= 10)
+    {
+        sprintf(word, "00%d", number);
     }
     else
     {
-        sprintf(heartRate, "0%d", heartRateNum);
-
+        sprintf(word, "000%d", number);
     }
 }
 
-void heartRateMonitor()
+/*
+Funcion que enciende el led rgb dado la entrada para el rojo, verde y azul
+*/
+void displayRGB(unsigned char red, unsigned char green, unsigned char blue)
 {
-    static unsigned char current = LOW;
-    static unsigned char previous = current;
-    static unsigned long currentEdge;
-    static unsigned long previousEdge = millis();
-    static unsigned int heartRateNum = 0;
-    static STATE_HR state = READING_HR;
-    static int counter = 0;
+    analogWrite(RED_P, red);
+    analogWrite(GREEN_P, green);
+    analogWrite(BLUE_P, blue);
+}
 
-    switch (state)
+/*
+Inicializacion de variable del tipo heartRateFSM
+*/
+void initialiseHeartRateFSM(HeartRateFSM *heartRateFSM)
+{
+    heartRateFSM->current = LOW;
+    heartRateFSM->previous = heartRateFSM->current;
+    heartRateFSM->previousEdge = millis();
+    heartRateFSM->heartRateNum = 0;
+    heartRateFSM->state = READING_AGE;
+    heartRateFSM->counter = 0;
+    heartRateFSM->maxHR = 0;
+    heartRateFSM->age = 10;
+}
+
+/*
+Funcion que calcula el ritmo cardiaco dado signalFSM y que guarda el resultado en displayFSM
+*/
+void heartRateMonitor(HeartRateFSM *heartRateFSM, SignalFSM *signalFSM, DisplayFSM *displayFSM)
+{
+    switch (heartRateFSM->state)
     {
     case READING_HR:
-        if(previous == LOW && current == HIGH)
+        if(heartRateFSM->previous == LOW && heartRateFSM->current == HIGH) //Si la señal cambio de LOW a HIGH
         {
-            currentEdge = millis();
-            heartRateNum += currentEdge - previousEdge;
-            counter++;
-            previousEdge = currentEdge;
+            heartRateFSM->currentEdge = millis(); //Se actualiza el tiempo del pico actual a los milisegundos actuales
+            heartRateFSM->heartRateNum += heartRateFSM->currentEdge - heartRateFSM->previousEdge; //Se suma la differencia entre el tiempo del pico actual y el pico anterior a hearRateNum
+            heartRateFSM->counter++; //Se incrementa el contador
+            heartRateFSM->previousEdge = heartRateFSM->currentEdge; //Se actualiza el valor del tiempo del pico anterior al del actual
         }
-        if(counter == 3)
+        if(heartRateFSM->counter == 3) //Si el contador llega a 3
         {
-            counter = 0;
-            heartRateNum /= 3;
-            heartRateNum = 600000 / heartRateNum;
-            convertHeartRateToString(heartRateNum);
-            heartRateNum = 0;
+            heartRateFSM->counter = 0; //Se retorna el contador a 0
+            heartRateFSM->heartRateNum /= 3; //Se divide lo que hay en heartRateNum en 3 (promedio)
+            heartRateFSM->heartRateNum = 600000 / heartRateFSM->heartRateNum; //Se calcula el ritmo cardiaco dado su periodo
+
+            //Se enciende el led rgb de un color dado el ritmo cardiaco actual y el maximo
+            if(heartRateFSM->heartRateNum <= heartRateFSM->maxHR * 0.5 * 10)
+            {
+                displayRGB(0, 0, 255);
+            }
+            else if(heartRateFSM->heartRateNum <= heartRateFSM->maxHR * 0.7 * 10)
+            {
+                displayRGB(0, 255, 255);
+            }
+            else if (heartRateFSM->heartRateNum <= heartRateFSM->maxHR * 0.85 * 10)
+            {
+                displayRGB(0, 255, 0);
+            }
+            else if (heartRateFSM->heartRateNum <= heartRateFSM->maxHR * 1 * 10)
+            {
+                displayRGB(255, 255, 0);
+            }
+            else
+            {
+                displayRGB(255, 0, 0);
+            }
+            convertNumberToString(heartRateFSM->heartRateNum, displayFSM->word); //Se transforma el ritmo cardiaco actual a string y se guarda en la estructura displayFSM
+            displayFSM->decimal = 1; //Se le indica a la estructura displayFSM que la palabra se imprimira con decimal
+            heartRateFSM->heartRateNum = 0; //Se reinicia hearRateNum en 0
         }
-        previous = current;
-        current = cleanSignal;
+        heartRateFSM->previous = heartRateFSM->current; //La señal previa toma el valor de la actual
+        heartRateFSM->current = signalFSM->cleanSignal; //La señal actual toma el valor de la señal limpia en la estructura signalFSM
+        break;
+    
+    default:
+        break;
+    }
+}
+
+
+void inputAge(HeartRateFSM *heartRateFSM, SignalFSM *signalFSM, DisplayFSM *displayFSM)
+{  
+    switch (heartRateFSM->state)
+    {
+    case READING_AGE:
+        if(heartRateFSM->previous == LOW && heartRateFSM->current == HIGH) //Si la señal anterior es LOW y la actual es HIGH
+        {
+            heartRateFSM->age++; //Se incrementa la edad
+            convertNumberToString(heartRateFSM->age, displayFSM->word); //Se convierte la edad a un string y se guarda en la estructura displayFSM
+        }
+        heartRateFSM->previous = heartRateFSM->current; //La señal actual se guarda en la previa
+        heartRateFSM->current = signalFSM->cleanSignal; //La señal actual se actualiza a la señal limpia de la estructura signalFSM
         break;
     
     default:
@@ -200,27 +370,56 @@ void heartRateMonitor()
 
 void setup()
 {
-    pinMode(DIG_1, OUTPUT);
-    pinMode(DIG_2, OUTPUT);
-    pinMode(DIG_3, OUTPUT);
-    pinMode(DIG_4, OUTPUT);
-    pinMode(SEGM_A, OUTPUT);
-    pinMode(SEGM_B, OUTPUT);
-    pinMode(SEGM_C, OUTPUT);
-    pinMode(SEGM_D, OUTPUT);
-    pinMode(SEGM_E, OUTPUT);
-    pinMode(SEGM_F, OUTPUT);
-    pinMode(SEGM_G, OUTPUT);
-    pinMode(SEGM_P, OUTPUT);
-    pinMode(READ, INPUT);
+    for(int i = 0; i < 8; i++)
+    {
+        pinMode(segments[i], OUTPUT);
+    }
+    for(int i = 0; i < 4; i++)
+    {
+        pinMode(digitPins[i], OUTPUT);
+    }
+    for(int i = 0; i < 3; i++)
+    {
+        pinMode(colorPins[i], OUTPUT);
+    }
 
-    bouncedSignal = 0;
-    cleanSignal = 0;
+    initializeDisplayFSM(&dFSM);
+    initializeSignalFSM(&sFSM, A5);
+    initializeSignalFSM(&cFSM, A4);
+    initialiseHeartRateFSM(&hRFSM);
+    convertNumberToString(hRFSM.age, dFSM.word);
+    char intro[HR_STRING_SIZE] = "edad";
+    unsigned char characters[HR_STRING_SIZE - 1];
+    wordTo7S(intro, characters);
+    unsigned long previousTime = millis();
+    displayRGB(0, 110, 0);
+    while(millis() - previousTime < 3000)
+    {
+        displayCharacters(characters);
+    }
+
 }
 
 void loop()
 {
-    deBouncer();
-    heartRateMonitor();
-    display();
+    if(hRFSM.maxHR == 0)
+    {
+        deBouncer(&sFSM);
+        deBouncer(&cFSM);
+        inputAge(&hRFSM, &sFSM, &dFSM);
+        display(&dFSM);
+        if(cFSM.cleanSignal == HIGH)
+        {
+            hRFSM.maxHR = 220 - hRFSM.age;
+            convertNumberToString(0, dFSM.word);
+            hRFSM.state = READING_HR;
+        }
+    }
+    else if(hRFSM.age > 1)
+    {
+        deBouncer(&sFSM);
+        heartRateMonitor(&hRFSM, &sFSM, &dFSM);
+        display(&dFSM);
+    }
+    
 }
